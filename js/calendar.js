@@ -101,8 +101,8 @@ function renderCal() {
       if (info.hasBookings) {
         summaryHtml = `
           <div class="day-sum">
-            <div class="ds-row"><span class="ds-k">上班</span><span class="ds-v">${info.earliestStart}</span></div>
-            <div class="ds-row"><span class="ds-k">下班</span><span class="ds-v">${info.latestEnd}</span></div>
+            <div class="ds-row ds-time"><span class="ds-k">上班</span><span class="ds-v">${info.earliestStart}</span></div>
+            <div class="ds-row ds-time"><span class="ds-k">下班</span><span class="ds-v">${info.latestEnd}</span></div>
             <div class="ds-row"><span class="ds-k">总计</span><span class="ds-v">${info.totalPeriods}课时</span></div>
             <div class="ds-row ds-gap"><span class="ds-k">还可</span><span class="ds-v">${info.bookablePeriods}课时</span></div>
           </div>`;
