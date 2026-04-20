@@ -1,0 +1,19 @@
+{
+  "name": "排课预约工具",
+  "short_name": "排课工具",
+  "description": "用于手机和电脑上的排课预约小工具。",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F4F6FA",
+  "theme_color": "#5B8AF5",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
