@@ -363,3 +363,51 @@ input:focus{border-color:var(--primary);background:#fff;box-shadow:0 0 0 3px rgb
 .precheck.good{background:#F0FFF4;border-color:#C6F6D5;color:#276749}
 .precheck.warn{background:#FFFAF0;border-color:#FEEBC8;color:#9C4221}
 .precheck.bad{background:#FFF5F5;border-color:#FED7D7;color:#C53030}
+
+@media (max-width:700px){
+  body{font-size:16px;-webkit-text-size-adjust:100%;text-size-adjust:100%}
+  .hdr{height:56px;padding:0 16px}
+  .logo{font-size:18px;gap:10px}
+  .logo svg{width:24px;height:24px}
+  .gear-btn{width:44px;height:44px}
+  .cal-wrap{padding:18px 14px 12px}
+  .cal-hdr{display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:14px}
+  .cal-title{font-size:24px;line-height:1.2}
+  .cal-ctrl{display:grid;grid-template-columns:44px 1fr 44px;width:100%;gap:8px}
+  .nav-btn,.cal-ctrl .btn{height:44px}
+  .cal-ctrl .btn{font-size:16px;justify-content:center}
+  .cal-grid{border-radius:10px}
+  .wk-name{padding:10px 0;font-size:14px}
+  .dc{min-height:72px;padding:6px}
+  .dn{width:24px;height:24px;font-size:15px}
+  .day-sum{font-size:12px;line-height:1.35;padding:4px 3px;gap:1px}
+  .day-sum .ds-k{display:inline;color:var(--muted)}
+  .day-sum .ds-v{text-align:right;width:auto;font-weight:600}
+  .ds-row{display:flex;justify-content:space-between;gap:4px}
+  .day-detail{height:auto;max-height:none}
+  .dt-inner{padding:16px 14px}
+  .day-summary-block{padding:12px;border-radius:9px}
+  .dsb-title{font-size:14px;margin-bottom:10px}
+  .dsb-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+  .dsb-cell{padding:9px 6px;border-radius:7px}
+  .dsb-k{font-size:12px;line-height:1.3}
+  .dsb-v{font-size:16px;line-height:1.35}
+  input[type=text],input[type=date],input[type=number],input[type=time],select,textarea{
+    font-size:16px;height:42px;
+  }
+  .btn{font-size:15px;height:42px}
+  .btn-sm{font-size:14px;height:36px}
+  .cfg-panel{padding:12px}
+  .fg label{font-size:13px}
+  .bl-name{font-size:15px}
+  .bl-time{font-size:13px}
+}
+
+@media (max-width:420px){
+  .cal-wrap,.sb-scroll,.dt-inner{padding-left:12px;padding-right:12px}
+  .cal-title{font-size:23px}
+  .dc{min-height:68px}
+  .day-sum{font-size:11px}
+  .dsb-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .dsb-cell{min-height:64px;display:flex;flex-direction:column;justify-content:center}
+}
