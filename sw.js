@@ -1,10 +1,11 @@
-const CACHE_NAME = 'scheduler-gift-v10';
+const CACHE_NAME = 'scheduler-gift-v12';
 const ASSETS = [
   './',
   './index.html',
   './manifest.json',
   './icon.svg',
-  './apple-touch-icon.png'
+  './apple-touch-icon.png',
+  './styles.css?v=12'
 ];
 
 self.addEventListener('install', event => {
