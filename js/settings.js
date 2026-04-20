@@ -17,6 +17,61 @@ function closeSettings() {
   document.getElementById('settingsModal').classList.remove('show');
   G.settingsDraft = null;
 }
+
+function backupFileName() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `paike-backup-${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}.json`;
+}
+
+function exportBackup() {
+  const data = JSON.stringify(currentDataSnapshot(), null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = backupFileName();
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast('已导出备份');
+}
+
+function importBackupFile(input) {
+  const file = input.files && input.files[0];
+  input.value = '';
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(String(reader.result || '{}'));
+      if (!Array.isArray(data.bookings)) throw new Error('备份文件格式不正确');
+      askConfirm(
+        '导入备份',
+        `将导入 ${data.bookings.length} 个预约，并覆盖当前设备上的所有数据。<br><br>导入前建议先导出一份当前备份。`,
+        () => {
+          pushUndoSnapshot();
+          importDataObject(data);
+          closeSettings();
+          loadCfgPanel(G.selDate);
+          renderCal();
+          if (G.selDate) {
+            renderBookingList();
+            renderDetail(G.selDate);
+          }
+          showToast('导入完成');
+        },
+        '确认导入'
+      );
+    } catch (e) {
+      alert(e.message || '备份文件无法读取');
+    }
+  };
+  reader.onerror = () => alert('备份文件无法读取');
+  reader.readAsText(file);
+}
+
 function renderSettingsBreaks() {
   const d = G.settingsDraft; if (!d) return;
   const host = document.getElementById('setBreaks');

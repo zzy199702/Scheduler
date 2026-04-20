@@ -10,7 +10,7 @@
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <title>排课预约工具</title>
-<link rel="stylesheet" href="styles.css?v=13">
+<link rel="stylesheet" href="styles.css?v=14">
 </head>
 <body>
 
@@ -214,6 +214,15 @@
       <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.6">
         保存后将作为新日期的默认配置；已单独设置过的日期不会被覆盖。<br>
         每日开始到结束时间以外的时段，默认视为休息/用餐时间。
+      </div>
+      <div class="backup-block">
+        <div class="backup-title">数据备份</div>
+        <div class="backup-actions">
+          <button class="btn btn-outline" onclick="exportBackup()">导出备份</button>
+          <button class="btn btn-outline" onclick="document.getElementById('backupFile').click()">导入备份</button>
+          <input type="file" id="backupFile" accept="application/json,.json" style="display:none" onchange="importBackupFile(this)">
+        </div>
+        <div class="backup-note">数据只保存在当前浏览器本地。换手机、换浏览器或添加到主屏幕后，可用备份文件迁移。</div>
       </div>
     </div>
     <div class="settings-foot">

@@ -1,28 +1,50 @@
 /* ========== Persistence ========== */
+const BACKUP_KEY = `${STORE_KEY}_backup`;
+
+function currentDataSnapshot() {
+  return {
+    defaultCfg: G.defaultCfg,
+    dayCfg: G.dayCfg,
+    bookings: G.bookings,
+    scheduleStrategy: G.scheduleStrategy,
+    exportedAt: new Date().toISOString(),
+    app: 'paike-scheduler',
+    version: STORE_KEY
+  };
+}
+
+function applyStoredData(d) {
+  if (!d || typeof d !== 'object') return false;
+  const hasData = !!(d.defaultCfg || d.dayCfg || Array.isArray(d.bookings) || d.scheduleStrategy);
+  if (!hasData) return false;
+  if (d.defaultCfg) G.defaultCfg = normalizeCfg({ ...DFLT, ...d.defaultCfg });
+  if (d.dayCfg) {
+    G.dayCfg = {};
+    for (const k of Object.keys(d.dayCfg)) G.dayCfg[k] = normalizeCfg(d.dayCfg[k]);
+  }
+  if (Array.isArray(d.bookings)) G.bookings = d.bookings.map(normalizeBooking);
+  if (d.scheduleStrategy) G.scheduleStrategy = d.scheduleStrategy;
+  return true;
+}
+
 function load() {
+  let loaded = false;
   try {
     const d = JSON.parse(localStorage.getItem(STORE_KEY) || '{}');
-    if (d.defaultCfg) G.defaultCfg = normalizeCfg({ ...DFLT, ...d.defaultCfg });
-    if (d.dayCfg) {
-      G.dayCfg = {};
-      for (const k of Object.keys(d.dayCfg)) G.dayCfg[k] = normalizeCfg(d.dayCfg[k]);
-    }
-    if (d.bookings) G.bookings = d.bookings.map(normalizeBooking);
-    if (d.scheduleStrategy) G.scheduleStrategy = d.scheduleStrategy;
-  } catch(e) {}
+    loaded = applyStoredData(d);
+  } catch(e) {
+    try {
+      const backup = JSON.parse(localStorage.getItem(BACKUP_KEY) || '{}');
+      loaded = applyStoredData(backup);
+      if (loaded) localStorage.setItem(STORE_KEY, JSON.stringify(backup));
+    } catch(_) {}
+  }
 
   // Migrate from older storage key
-  if (!localStorage.getItem(STORE_KEY)) {
+  if (!loaded && !localStorage.getItem(STORE_KEY)) {
     try {
       const old = JSON.parse(localStorage.getItem('paike_v5') || '{}');
-      if (old.defaultCfg) G.defaultCfg = normalizeCfg({ ...DFLT, ...old.defaultCfg });
-      if (old.dayCfg) {
-        G.dayCfg = {};
-        for (const k of Object.keys(old.dayCfg)) G.dayCfg[k] = normalizeCfg(old.dayCfg[k]);
-      }
-      if (old.bookings) G.bookings = old.bookings.map(normalizeBooking);
-      if (old.scheduleStrategy) G.scheduleStrategy = old.scheduleStrategy;
-      save();
+      if (applyStoredData(old)) save();
     } catch(e) {}
   }
 }
@@ -39,10 +61,9 @@ function normalizeCfg(c) {
   };
 }
 function save() {
-  localStorage.setItem(STORE_KEY, JSON.stringify({
-    defaultCfg: G.defaultCfg, dayCfg: G.dayCfg, bookings: G.bookings,
-    scheduleStrategy: G.scheduleStrategy
-  }));
+  const existing = localStorage.getItem(STORE_KEY);
+  if (existing) localStorage.setItem(BACKUP_KEY, existing);
+  localStorage.setItem(STORE_KEY, JSON.stringify(currentDataSnapshot()));
 }
 
 
@@ -56,4 +77,12 @@ function normalizeBooking(b) {
     lockedStart: !!b.lockedStart,
     breakMin: b.breakMin != null && Number.isFinite(+b.breakMin) ? +b.breakMin : undefined
   };
+}
+
+function importDataObject(d) {
+  if (!d || typeof d !== 'object' || !Array.isArray(d.bookings)) {
+    throw new Error('备份文件格式不正确');
+  }
+  applyStoredData(d);
+  save();
 }

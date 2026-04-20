@@ -61,6 +61,10 @@ input:focus{border-color:var(--primary);background:#fff;box-shadow:0 0 0 3px rgb
 .settings-hdr h3{font-size:15px;font-weight:700;flex:1}
 .settings-body{padding:16px 18px;overflow-y:auto;flex:1}
 .settings-foot{padding:14px 18px;display:flex;gap:10px;justify-content:flex-end;border-top:1px solid var(--border);flex-shrink:0}
+.backup-block{margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:8px;background:#F8FAFC}
+.backup-title{font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px}
+.backup-actions{display:flex;gap:8px;flex-wrap:wrap}
+.backup-note{font-size:11px;color:var(--muted);line-height:1.6;margin-top:8px}
 
 /* Break/Meal items */
 .breaks-block{margin-top:12px}
