@@ -316,7 +316,32 @@ function planScore(summary) {
   s += summary.movedConfirmed.length * weights.moved;
   const breakMin = Object.values(summary.breakHitsMap).reduce((a,b)=>a+b, 0);
   s += breakMin * weights.break;
-  s += (summary.earlyOpenMin + summary.lateCloseMin) * weights.hours;
+
+  // --- Asymmetric soft/hard thresholds for out-of-day minutes ---
+  // Soft thresholds: late 60 min, early 30 min. Within soft threshold, late < early
+  // (teacher prefers staying late over arriving early).
+  // Beyond threshold: 10x multiplier — enough that 120 min over >> moving 1-2 confirmed.
+  // Coefficients calibrated so (for student strategy):
+  //   late 60 (360) < early 30 (432) < move 1 confirmed (500) < move 2 (1000)
+  //     < late 90 (2160) < early 60 (4752) < late 120 (4320) < early 120 (7992)
+  // teacher strategy (hours=12) naturally reorders: move confirmed cheapest,
+  //   which matches "老师时间优先" semantics.
+  const EARLY_SOFT = 30;
+  const LATE_SOFT = 60;
+  const HARD_MULT = 10;
+  const EARLY_COEF = 2.4;   // early minutes weighed 2.4x vs late (within soft)
+  const LATE_COEF = 1.0;
+
+  const earlySoft = Math.min(summary.earlyOpenMin, EARLY_SOFT);
+  const earlyHard = Math.max(0, summary.earlyOpenMin - EARLY_SOFT);
+  s += earlySoft * weights.hours * EARLY_COEF;
+  s += earlyHard * weights.hours * EARLY_COEF * HARD_MULT;
+
+  const lateSoft = Math.min(summary.lateCloseMin, LATE_SOFT);
+  const lateHard = Math.max(0, summary.lateCloseMin - LATE_SOFT);
+  s += lateSoft * weights.hours * LATE_COEF;
+  s += lateHard * weights.hours * LATE_COEF * HARD_MULT;
+
   if (summary.overallEnd != null) s += Math.max(0, summary.overallEnd - 600) * weights.end;
   s += summary.gapTotal * weights.gap;
   // Unplaced penalty (very high — we'd rather try alternative plan)
@@ -544,15 +569,25 @@ function buildAutoRearrangePlans(date, target=null, options={}) {
   if (planBackCurrent) plans.push(planBackCurrent);
 
   // ---- STRATEGY B: Allow moving confirmed bookings ----
-  // Only fire when keep-confirmed plans all FAIL to place everyone (i.e. confirmed bookings
-  // genuinely block the pendings). If any packPending plan placed everyone, moving confirmed
-  // is unnecessary — rearranging confirmed when there's already a working plan just produces
-  // nonsense (like swapping two confirmed slots for no benefit).
-  const hasCompletePackPendingPlan = plans.some(p => {
+  // Original: only fire when keep-confirmed plans ALL fail to place everyone.
+  // Revised:  also fire when all keep-confirmed plans have one of these problems:
+  //           - exceed soft out-of-day thresholds (>30 min early OR >60 min late), OR
+  //           - violate student preferences by more than 60 minutes in total
+  //           This gives the chooser a chance to compare "move 1-2 confirmed"
+  //           against degraded alternatives.
+  const EARLY_SOFT_GEN = 30;
+  const LATE_SOFT_GEN = 60;
+  const PREF_OVER_GEN = 60;
+  const hasAcceptableKeepPlan = plans.some(p => {
     const unplaced = p.placements.filter(pl => !pl.startTime).length;
-    return unplaced === 0;
+    if (unplaced > 0) return false;
+    const sum = p.summary || summarizePlan({ placements: p.placements, date });
+    p.summary = sum; // cache for later
+    return sum.earlyOpenMin <= EARLY_SOFT_GEN
+        && sum.lateCloseMin <= LATE_SOFT_GEN
+        && sum.prefOverTotal <= PREF_OVER_GEN;
   });
-  if (confirmed.length > 0 && !hasCompletePackPendingPlan && options.allowMoveConfirmed !== false) {
+  if (confirmed.length > 0 && !hasAcceptableKeepPlan && options.allowMoveConfirmed !== false) {
     for (const cmp of orderings.slice(0,2)) {
       const plan = packWithConfirmedMoves(date, pendings.slice().sort(cmp), confirmed, { allowBreak:false, allowOutOfDay:false, fixedPlacements });
       if (plan) plans.push(plan);
@@ -564,6 +599,17 @@ function buildAutoRearrangePlans(date, target=null, options={}) {
       if (planEarly) plans.push(planEarly);
       const planLate = packWithConfirmedMoves(date, pendings.slice().sort(cmp), confirmed, { allowBreak:true, allowOutOfDay:true, outOfDaySide:'late', fixedPlacements });
       if (planLate) plans.push(planLate);
+    }
+    // Eviction plans: actively move 1-2 confirmed to let pending into its window.
+    // Try both "nearest" (disrupt the one most in the way) and "widest" (disrupt the
+    // one easiest to re-home) so the chooser can compare.
+    for (const mode of ['nearest', 'widest']) {
+      for (const cmp of orderings.slice(0,2)) {
+        const planE = packEvictConfirmed(date, pendings.slice().sort(cmp), confirmed, { evictMode: mode, allowOutOfDay:false, fixedPlacements });
+        if (planE) plans.push(planE);
+        const planEExt = packEvictConfirmed(date, pendings.slice().sort(cmp), confirmed, { evictMode: mode, allowOutOfDay:true, fixedPlacements });
+        if (planEExt) plans.push(planEExt);
+      }
     }
   }
 
@@ -882,6 +928,205 @@ function packWithConfirmedMoves(date, pendings, confirmed, opts) {
   }
 
   return { placements, date, strategy:'with-confirmed-moves' };
+}
+
+/* ========== Actively evict 1-2 confirmed bookings to make room for pending ==========
+  Unlike packWithConfirmedMoves (which keeps confirmed at original positions and packs
+  pending into leftover gaps), this function ACTIVELY picks 1-2 confirmed bookings
+  that overlap a pending's preferred window, removes them, places the pending first,
+  then re-homes the evicted confirmed within THEIR OWN preferred windows.
+
+  If an evicted confirmed cannot fit back within its own [winStart, winEnd], the whole
+  plan is abandoned (we never push a confirmed outside its agreed-upon window).
+
+  `mode` controls which confirmed to evict:
+    'nearest'  → evict the confirmed(s) whose original slot overlaps the pending's
+                 preferred window most directly (minimum disruption to other students)
+    'widest'   → evict the confirmed(s) with the widest [winStart, winEnd] (easiest
+                 to re-home elsewhere)
+*/
+function packEvictConfirmed(date, pendings, confirmed, opts) {
+  const cfg = getDayCfg(date);
+  const brk = Number(cfg.brk) || 0;
+  const dayS = toMin(cfg.start), dayE = toMin(cfg.end);
+  const mode = opts.evictMode || 'nearest';
+
+  // We only invoke eviction for a single "target" pending (the one that can't
+  // fit otherwise). Pick: the pending whose preferred window has the least
+  // free space given current confirmed layout.
+  if (!pendings.length) return null;
+
+  // Pick target pending: the one whose preferred window is most blocked
+  // by confirmed bookings.
+  let target = pendings[0];
+  let maxBlock = -1;
+  for (const p of pendings) {
+    const pWS = toMin(p.winStart), pWE = toMin(p.winEnd);
+    let blocked = 0;
+    for (const c of confirmed) {
+      const cS = toMin(c.startTime), cE = cS + c.periods * 50;
+      const ov = Math.max(0, Math.min(pWE, cE) - Math.max(pWS, cS));
+      blocked += ov;
+    }
+    if (blocked > maxBlock) { maxBlock = blocked; target = p; }
+  }
+  if (maxBlock <= 0) return null; // no confirmed blocks any pending — eviction pointless
+
+  const targetWS = toMin(target.winStart), targetWE = toMin(target.winEnd);
+  const targetDur = target.periods * 50;
+
+  // Rank confirmed by eviction priority.
+  const rank = (c) => {
+    const cS = toMin(c.startTime), cE = cS + c.periods * 50;
+    const overlap = Math.max(0, Math.min(targetWE, cE) - Math.max(targetWS, cS));
+    if (mode === 'widest') {
+      // Widest own window → easiest to re-home. Only consider overlapping ones.
+      if (overlap === 0) return Infinity;
+      const cWidth = toMin(c.winEnd) - toMin(c.winStart);
+      return -cWidth; // negative so larger width = "smaller rank" = preferred
+    }
+    // 'nearest': prefer confirmed whose current slot overlaps target's window most.
+    if (overlap === 0) return Infinity;
+    return -overlap; // larger overlap = preferred for eviction
+  };
+
+  const evictCandidates = confirmed
+    .slice()
+    .map(c => ({ c, r: rank(c) }))
+    .filter(x => x.r !== Infinity)
+    .sort((a,b) => a.r - b.r)
+    .map(x => x.c);
+
+  if (!evictCandidates.length) return null;
+
+  // Try evicting 1 first, then 2 if needed.
+  for (const evictCount of [1, 2]) {
+    if (evictCandidates.length < evictCount) continue;
+    const toEvict = evictCandidates.slice(0, evictCount);
+    const evictIds = new Set(toEvict.map(c => c.id));
+    const keepConfirmed = confirmed.filter(c => !evictIds.has(c.id));
+
+    // Build fixed blockers from kept confirmed + breaks.
+    const fixed = [];
+    for (const c of keepConfirmed) {
+      const s = toMin(c.startTime), e = s + c.periods * 50;
+      fixed.push({ s, e, pad: bookingBreakMin(c, brk), id: c.id, kind: 'confirmed' });
+    }
+    for (const br of (cfg.breaks || [])) {
+      if (!br.s || !br.e) continue;
+      const s = toMin(br.s), e = toMin(br.e);
+      if (e > s) fixed.push({ s, e, pad: 0, kind: 'break', label: br.label || '休息' });
+    }
+    for (const pl of (opts.fixedPlacements || [])) {
+      if (!pl.startTime) continue;
+      const s = toMin(pl.startTime), e = s + pl.periods*50;
+      fixed.push({ s, e, pad: bookingBreakMin(pl, brk), id: pl.id, kind: 'fixed-target' });
+    }
+
+    // Step 1: place target pending inside its preferred window (no compromise on day hours).
+    const searchWS = Math.max(targetWS, dayS);
+    const searchWE = Math.min(targetWE, dayE);
+    if (searchWE - searchWS < targetDur) continue; // target itself doesn't fit in day∩pref
+
+    const placedNew = [];
+    const allBlockers = [...fixed];
+    let targetStart = tryPlace(searchWS, searchWE, targetDur, allBlockers, brk, toMin(target.startTime), bookingBreakMin(target, brk));
+    if (targetStart == null) continue; // couldn't place target even after eviction
+
+    placedNew.push({ s: targetStart, e: targetStart + targetDur, pad: bookingBreakMin(target, brk) });
+
+    // Step 2: re-home each evicted confirmed within ITS OWN preferred window.
+    const evictedPlacements = [];
+    let allEvictedFit = true;
+    for (const c of toEvict) {
+      const cDur = c.periods * 50;
+      const cPad = bookingBreakMin(c, brk);
+      const cWS = Math.max(toMin(c.winStart), dayS);
+      const cWE = Math.min(toMin(c.winEnd), dayE);
+      if (cWE - cWS < cDur) { allEvictedFit = false; break; }
+      const blockersNow = [...fixed, ...placedNew];
+      // Prefer staying close to original slot.
+      const origStart = toMin(c.startTime);
+      const cStart = tryPlace(cWS, cWE, cDur, blockersNow, brk, origStart, cPad);
+      if (cStart == null) { allEvictedFit = false; break; }
+      placedNew.push({ s: cStart, e: cStart + cDur, pad: cPad });
+      evictedPlacements.push({ c, start: cStart });
+    }
+    if (!allEvictedFit) continue;
+
+    // Step 3: place remaining pendings (other than target) in their preferred windows.
+    const otherPendings = pendings.filter(p => p.id !== target.id);
+    const otherPlacements = [];
+    let allPendingsFit = true;
+    for (const p of otherPendings) {
+      const pDur = p.periods * 50;
+      const pPad = bookingBreakMin(p, brk);
+      const pWS = Math.max(toMin(p.winStart), dayS);
+      const pWE = Math.min(toMin(p.winEnd), dayE);
+      const blockersNow = [...fixed, ...placedNew];
+      let startM = null;
+      if (pWE - pWS >= pDur) {
+        startM = tryPlace(pWS, pWE, pDur, blockersNow, brk, null, pPad);
+      }
+      if (startM == null) {
+        startM = tryPlaceClosestTo(dayS, dayE, pDur, blockersNow, brk, toMin(p.winStart), toMin(p.winEnd), pPad);
+      }
+      if (startM == null && opts.allowOutOfDay) {
+        const ext = outOfDaySearchBounds(dayS, dayE, opts);
+        startM = tryPlaceClosestTo(ext.s, ext.e, pDur, blockersNow, brk, toMin(p.winStart), toMin(p.winEnd), pPad);
+      }
+      if (startM == null) { allPendingsFit = false; break; }
+      placedNew.push({ s: startM, e: startM + pDur, pad: pPad });
+      otherPlacements.push({ p, start: startM });
+    }
+    if (!allPendingsFit) continue;
+
+    // Build placements list.
+    const placements = [...(opts.fixedPlacements || []).map(pl => ({...pl}))];
+    // Kept confirmed at original positions
+    for (const c of keepConfirmed) {
+      placements.push({
+        id: c.id, name: c.name, isPending: false, isConfirmed: true,
+        startTime: c.startTime, periods: c.periods,
+        breakMin: bookingBreakMin(c, brk),
+        winStart: c.winStart, winEnd: c.winEnd,
+        originalStart: c.startTime
+      });
+    }
+    // Evicted confirmed at new positions (this is what triggers movedConfirmed in summary)
+    for (const ep of evictedPlacements) {
+      placements.push({
+        id: ep.c.id, name: ep.c.name, isPending: false, isConfirmed: true,
+        startTime: toT(ep.start), periods: ep.c.periods,
+        breakMin: bookingBreakMin(ep.c, brk),
+        winStart: ep.c.winStart, winEnd: ep.c.winEnd,
+        originalStart: ep.c.startTime  // <-- different from startTime ⇒ counted as moved
+      });
+    }
+    // Target pending
+    placements.push({
+      id: target.id, name: target.name, isPending: true, isConfirmed: false,
+      startTime: toT(targetStart), periods: target.periods,
+      breakMin: bookingBreakMin(target, brk),
+      winStart: target.winStart, winEnd: target.winEnd,
+      originalStart: null,
+      __isTarget: !!target.__isTarget
+    });
+    // Other pendings
+    for (const op of otherPlacements) {
+      placements.push({
+        id: op.p.id, name: op.p.name, isPending: true, isConfirmed: false,
+        startTime: toT(op.start), periods: op.p.periods,
+        breakMin: bookingBreakMin(op.p, brk),
+        winStart: op.p.winStart, winEnd: op.p.winEnd,
+        originalStart: null,
+        __isTarget: !!op.p.__isTarget
+      });
+    }
+
+    return { placements, date, strategy: `evict-${mode}-${evictCount}` };
+  }
+  return null;
 }
 
 /* ========== Describe plan costs for UI (the "代价说明" card) ========== */
