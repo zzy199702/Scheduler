@@ -613,6 +613,15 @@ function buildAutoRearrangePlans(date, target=null, options={}) {
     }
   }
 
+  // ---- STRATEGY C: Compact confirmed bookings ----
+  // Pull later confirmed forward to remove large gaps (e.g. after a cancellation).
+  // Only generates a plan when the gain is meaningful (>=60 min gap reduction) and
+  // at least one confirmed actually moves.
+  if (confirmed.length >= 2 && options.allowCompactConfirmed !== false) {
+    const planCompact = packCompactConfirmed(date, pendings, confirmed, { fixedPlacements });
+    if (planCompact) plans.push(planCompact);
+  }
+
   // Deduplicate exact schedules first, then collapse equivalent user-facing choices.
   const seen = new Set();
   const exactUnique = [];
@@ -1129,6 +1138,144 @@ function packEvictConfirmed(date, pendings, confirmed, opts) {
   return null;
 }
 
+/* ========== Compact confirmed bookings to remove large gaps ==========
+  Called when the day has unusually large gaps between confirmed bookings
+  (typically after a cancellation). Attempts to pull later confirmed bookings
+  forward, maintaining their relative order, while respecting each student's
+  preferred window [winStart, winEnd].
+
+  Returns null if no meaningful compaction is possible (gain < GAIN_THRESHOLD).
+*/
+function packCompactConfirmed(date, pendings, confirmed, opts) {
+  const cfg = getDayCfg(date);
+  const brk = Number(cfg.brk) || 0;
+  const dayS = toMin(cfg.start), dayE = toMin(cfg.end);
+  const GAIN_THRESHOLD = 60; // require >=60 min improvement (total gap reduction)
+
+  if (confirmed.length < 2) return null;
+
+  // Sort confirmed by current startTime ascending (preserve relative order).
+  const sortedC = confirmed.slice().sort((a,b) => toMin(a.startTime) - toMin(b.startTime));
+
+  // Compute current total "dead gap" between consecutive confirmed bookings.
+  // Also skip gaps that are occupied by custom breaks — those are legitimate.
+  const breakIntervals = (cfg.breaks || []).map(br => {
+    if (!br || !br.s || !br.e) return null;
+    const s = Math.max(dayS, toMin(br.s));
+    const e = Math.min(dayE, toMin(br.e));
+    return e > s ? { s, e } : null;
+  }).filter(Boolean);
+  const subtractBreaks = (s, e) => {
+    let segs = [{ s, e }];
+    for (const br of breakIntervals) {
+      const next = [];
+      for (const seg of segs) {
+        const ovS = Math.max(seg.s, br.s), ovE = Math.min(seg.e, br.e);
+        if (ovE <= ovS) { next.push(seg); continue; }
+        if (seg.s < ovS) next.push({ s: seg.s, e: ovS });
+        if (ovE < seg.e) next.push({ s: ovE, e: seg.e });
+      }
+      segs = next;
+    }
+    return segs;
+  };
+  const realGap = (freeS, freeE) => {
+    if (freeE <= freeS) return 0;
+    return subtractBreaks(freeS, freeE).reduce((sum, seg) => sum + (seg.e - seg.s), 0);
+  };
+
+  let currentGapTotal = 0;
+  for (let i = 0; i < sortedC.length - 1; i++) {
+    const curEnd = toMin(sortedC[i].startTime) + sortedC[i].periods * 50;
+    const req = bookingBreakMin(sortedC[i], brk);
+    const freeS = curEnd + req;
+    const freeE = toMin(sortedC[i+1].startTime);
+    currentGapTotal += realGap(freeS, freeE);
+  }
+
+  // Build fixed blockers from custom breaks + pending (keep pending where they are).
+  const pendingBlockers = pendings.map(p => ({
+    s: toMin(p.startTime), e: toMin(p.startTime) + p.periods * 50,
+    pad: bookingBreakMin(p, brk), id: p.id, kind: 'pending'
+  })).filter(b => !isNaN(b.s));
+  const breakBlockers = (cfg.breaks || []).filter(br => br && br.s && br.e).map(br => ({
+    s: toMin(br.s), e: toMin(br.e), pad: 0, kind: 'break', label: br.label || '休息'
+  }));
+  const fixedBase = [...pendingBlockers, ...breakBlockers];
+  for (const pl of (opts.fixedPlacements || [])) {
+    if (!pl.startTime) continue;
+    const s = toMin(pl.startTime), e = s + pl.periods*50;
+    fixedBase.push({ s, e, pad: bookingBreakMin(pl, brk), id: pl.id, kind: 'fixed-target' });
+  }
+
+  // Place each confirmed as early as possible within its own [winStart, winEnd],
+  // maintaining order (each must start after previous ends + its break).
+  const placed = []; // [{s, e, pad, id}]
+  const placedList = [];
+  for (const c of sortedC) {
+    const dur = c.periods * 50;
+    const cPad = bookingBreakMin(c, brk);
+    const cWS = Math.max(toMin(c.winStart), dayS);
+    const cWE = Math.min(toMin(c.winEnd), dayE);
+    if (cWE - cWS < dur) return null; // shouldn't happen for a valid existing booking
+
+    // Minimum start: previous's end + previous's pad
+    let minStart = cWS;
+    if (placed.length > 0) {
+      const prev = placed[placed.length - 1];
+      minStart = Math.max(minStart, prev.e + prev.pad);
+    }
+
+    const blockers = [...fixedBase, ...placed];
+    // Try to place as early as possible >= minStart, within [cWS, cWE].
+    const startM = tryPlace(Math.max(minStart, cWS), cWE, dur, blockers, brk, minStart, cPad);
+    if (startM == null) return null; // can't compact this one — abort whole plan
+
+    placed.push({ s: startM, e: startM + dur, pad: cPad, id: c.id });
+    placedList.push({ c, start: startM });
+  }
+
+  // Compute new gap total.
+  let newGapTotal = 0;
+  for (let i = 0; i < placedList.length - 1; i++) {
+    const curEnd = placedList[i].start + placedList[i].c.periods * 50;
+    const req = bookingBreakMin(placedList[i].c, brk);
+    const freeS = curEnd + req;
+    const freeE = placedList[i+1].start;
+    newGapTotal += realGap(freeS, freeE);
+  }
+
+  const gain = currentGapTotal - newGapTotal;
+  if (gain < GAIN_THRESHOLD) return null; // not worth it
+  // Also verify at least one confirmed actually moved.
+  const anyMoved = placedList.some(p => toT(p.start) !== p.c.startTime);
+  if (!anyMoved) return null;
+
+  // Build placements.
+  const placements = [...(opts.fixedPlacements || []).map(pl => ({...pl}))];
+  // Pending keep original positions
+  for (const p of pendings) {
+    placements.push({
+      id: p.id, name: p.name, isPending: true, isConfirmed: false,
+      startTime: p.startTime, periods: p.periods,
+      breakMin: bookingBreakMin(p, brk),
+      winStart: p.winStart, winEnd: p.winEnd,
+      originalStart: null
+    });
+  }
+  // Confirmed at new (possibly moved) positions
+  for (const pl of placedList) {
+    placements.push({
+      id: pl.c.id, name: pl.c.name, isPending: false, isConfirmed: true,
+      startTime: toT(pl.start), periods: pl.c.periods,
+      breakMin: bookingBreakMin(pl.c, brk),
+      winStart: pl.c.winStart, winEnd: pl.c.winEnd,
+      originalStart: pl.c.startTime
+    });
+  }
+  return { placements, date, strategy: 'compact-confirmed', compactionGain: gain };
+}
+
 /* ========== Describe plan costs for UI (the "代价说明" card) ========== */
 function describePlanCosts(plan, targetId=null) {
   // Plan MUST have summary already computed.
@@ -1222,6 +1369,18 @@ function autoRearrangeDay(date, target=null, options={}) {
   };
 
   if (isClean(best)) {
+    // Special case: if caller asked for compaction and a compact plan exists
+    // alongside the clean current-state plan, surface both for user choice
+    // instead of silently auto-applying the status quo.
+    if (options.allowCompactConfirmed) {
+      const compactPlan = plans.find(p => p.strategy === 'compact-confirmed');
+      if (compactPlan) {
+        // Put the compact plan at index 0 (it's the meaningful "change"),
+        // keep the current-state plan as an explicit "keep as is" option.
+        const ordered = [compactPlan, ...plans.filter(p => p !== compactPlan)];
+        return { outcome: 'choose', plans: ordered, target };
+      }
+    }
     // Auto-apply clean plan.
     const countRearranged = countActualMoves(best, target);
     applyPlan(best, target);
@@ -1620,15 +1779,19 @@ function manualRearrangeDay(date) {
   save();
   G.suppressNextUndo = true;
   const pendings = pendingBookingsOn(date);
-  if (!pendings.length) {
+  const confirmed = confirmedBookingsOn(date);
+  if (!pendings.length && !confirmed.length) {
     G.suppressNextUndo = false;
-    showToast('已应用当天课间；当天没有待定预约，无需重排');
+    showToast('当天没有预约');
     renderBookingList();
     renderCal();
     renderDetail(date);
     return;
   }
-  const result = autoRearrangeDay(date, null, { silent: false });
+  // Note: we used to early-return when there were no pendings. Now we still call
+  // autoRearrangeDay, which can propose a "compact confirmed" plan if the day has
+  // large gaps (e.g. after a student cancels and leaves a hole).
+  const result = autoRearrangeDay(date, null, { silent: false, allowCompactConfirmed: true });
   if (result.outcome === 'choose') {
     showPlanChooser(result.plans, null,
       '重新排课需要取舍',
